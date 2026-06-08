@@ -94,8 +94,6 @@ Active → (deadline reached, goal met)    → Successful → Completed
        → (deadline reached, goal not met) → Failed
 ```
 
-```
-
 #### Security Features
 
 - **ReentrancyGuard** — prevents reentrancy on all ETH transfers
