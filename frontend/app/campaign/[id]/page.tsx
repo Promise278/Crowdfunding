@@ -5,10 +5,9 @@ import { ethers } from "ethers";
 import Link from "next/link";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
-  Campaign, Milestone, STATUS_COLOR, STATUS_LABEL, getReadContract,
-  CONTRACT_ADDRESS, ABI,
+  Campaign, Milestone, STATUS_COLOR, STATUS_LABEL,
+  getReadContract, getWriteContract, CONTRACT_ADDRESS, ABI,
 } from "@/lib/contract";
-import { useWriteContract } from "@/lib/useContract";
 import { fmt, fmtDate, pct, shortAddr, timeLeft } from "@/lib/utils";
 import Navbar from "@/components/Navbar";
 import MilestonePanel from "@/components/MilestonePanel";
@@ -19,18 +18,32 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
   const campaignId    = parseInt(idStr);
 
   const { address, isConnected } = useAccount();
-  const getContract              = useWriteContract();
   const { show, Toast }          = useToast();
 
   const [campaign,   setCampaign]   = useState<Campaign | null>(null);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
-  const [myContrib,  setMyContrib]  = useState(BigInt(0));
+  const [myContrib,  setMyContrib]  = useState(0n);
   const [refunded,   setRefunded]   = useState(false);
   const [loading,    setLoading]    = useState(true);
   const [ethAmt,     setEthAmt]     = useState("");
   const [funding,    setFunding]    = useState(false);
   const [busy,       setBusy]       = useState(false);
 
+  /* ── helpers ─────────────────────────────────────────────────────────── */
+  function normCampaign(c: Record<string, unknown>): Campaign {
+    return {
+      creator:          String(c.creator),
+      title:            String(c.title),
+      description:      String(c.description),
+      goal:             BigInt(c.goal as bigint),
+      raised:           BigInt(c.raised as bigint),
+      deadline:         BigInt(c.deadline as bigint),
+      contributorCount: BigInt(c.contributorCount as bigint),
+      status:           Number(c.status) as 0|1|2|3,
+    };
+  }
+
+  /* ── load data ───────────────────────────────────────────────────────── */
   const load = useCallback(async () => {
     try {
       const cf = await getReadContract();
@@ -38,17 +51,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         cf.getCampaign(campaignId),
         cf.getMilestones(campaignId),
       ]);
-      // Normalise all BigInt fields so they're plain values, not ethers proxies
-      setCampaign({
-        creator:          c.creator,
-        title:            c.title,
-        description:      c.description,
-        goal:             BigInt(c.goal),
-        raised:           BigInt(c.raised),
-        deadline:         BigInt(c.deadline),
-        contributorCount: BigInt(c.contributorCount),
-        status:           Number(c.status) as 0|1|2|3,
-      });
+      setCampaign(normCampaign(c));
       setMilestones([...ms]);
       if (address) {
         const [contrib, wasRefunded] = await Promise.all([
@@ -56,7 +59,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           cf.refunded(campaignId, address),
         ]);
         setMyContrib(BigInt(contrib));
-        setRefunded(wasRefunded);
+        setRefunded(Boolean(wasRefunded));
       }
     } catch (e) {
       console.error("load error", e);
@@ -67,79 +70,65 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
   useEffect(() => { load(); }, [load]);
 
+  /* ── contribute ──────────────────────────────────────────────────────── */
   async function contribute(e: React.FormEvent) {
     e.preventDefault();
-    if (!isConnected || !getContract) return show("Connect your wallet first", "err");
     const amt = parseFloat(ethAmt);
     if (!ethAmt || isNaN(amt) || amt <= 0) return show("Enter a valid ETH amount", "err");
 
     setFunding(true);
     try {
-      const cf  = await getContract();
-      const tx  = await cf.contribute(campaignId, { value: ethers.parseEther(ethAmt) });
+      const cf = await getWriteContract();      // triggers MetaMask popup
+      const tx = await cf.contribute(campaignId, { value: ethers.parseEther(ethAmt) });
       show("⏳ Waiting for confirmation…");
       await tx.wait();
 
-      // Wait 1 block then poll MetaMask's own provider (already on latest block)
-      await new Promise(r => setTimeout(r, 1500));
-
-      const mmProvider = new ethers.BrowserProvider(window.ethereum);
+      // Read updated state from the same provider that just confirmed the tx
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mmProvider = new ethers.BrowserProvider((window as any).ethereum);
       const freshCf    = new ethers.Contract(CONTRACT_ADDRESS, ABI, mmProvider);
 
-      // Retry up to 8 times (every 2s) until raised actually increases
-      let newRaised = BigInt(0);
-      let newCount  = BigInt(0);
-      for (let i = 0; i < 8; i++) {
-        const raw = await freshCf.getCampaign(campaignId);
-        newRaised = BigInt(raw.raised);
-        newCount  = BigInt(raw.contributorCount);
-        if (newRaised > (campaign?.raised ?? BigInt(0))) break;
+      // Retry until raised increases (node may be 1-2 blocks behind)
+      let updated = await freshCf.getCampaign(campaignId);
+      for (let i = 0; i < 6 && BigInt(updated.raised) <= (campaign?.raised ?? 0n); i++) {
         await new Promise(r => setTimeout(r, 2000));
+        updated = await freshCf.getCampaign(campaignId);
       }
 
-      // Spread into plain Campaign so React sees new object reference
-      setCampaign(prev => prev ? {
-        ...prev,
-        raised:           BigInt(newRaised),
-        contributorCount: BigInt(newCount),
-        goal:             BigInt(prev.goal),
-        deadline:         BigInt(prev.deadline),
-      } : prev);
-
-      // Update my contribution
-      const signer       = await mmProvider.getSigner();
-      const newMyContrib = BigInt(await freshCf.getContribution(campaignId, signer.address));
-      setMyContrib(newMyContrib);
-
+      setCampaign(normCampaign(updated));
+      const signer = await mmProvider.getSigner();
+      setMyContrib(BigInt(await freshCf.getContribution(campaignId, signer.address)));
       setEthAmt("");
-      show(`🎉 Done! Raised: ${ethers.formatEther(newRaised)} ETH`);
-
+      show(`🎉 Funded! Total raised: ${ethers.formatEther(BigInt(updated.raised))} ETH`);
     } catch (err: unknown) {
       const raw    = err instanceof Error ? err.message : String(err);
       const reason = raw.match(/reason="([^"]+)"/)?.[1]
                   ?? raw.match(/reverted with reason string '([^']+)'/)?.[1]
                   ?? raw.match(/execution reverted: ([^\n]+)/)?.[1]
-                  ?? raw.slice(0, 120);
+                  ?? raw.slice(0, 150);
       show(reason, "err");
-    } finally {
-      setFunding(false);
-    }
+    } finally { setFunding(false); }
   }
 
+  /* ── other transactions ──────────────────────────────────────────────── */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function runTx(fn: (cf: any) => Promise<{ wait: () => Promise<unknown> }>) {
-    if (!getContract) return show("Connect your wallet first", "err");
     setBusy(true);
     try {
-      const cf = await getContract();
+      const cf = await getWriteContract();
       await (await fn(cf)).wait();
-      show("Done ✓"); load();
+      show("Done ✓");
+      load();
     } catch (err: unknown) {
-      const raw = err instanceof Error ? err.message : String(err);
-      show(raw.match(/reason="([^"]+)"/)?.[1] ?? raw.slice(0, 100), "err");
+      const raw    = err instanceof Error ? err.message : String(err);
+      const reason = raw.match(/reason="([^"]+)"/)?.[1]
+                  ?? raw.match(/reverted with reason string '([^']+)'/)?.[1]
+                  ?? raw.slice(0, 150);
+      show(reason, "err");
     } finally { setBusy(false); }
   }
 
+  /* ── render guards ───────────────────────────────────────────────────── */
   if (loading) return (
     <>
       <Navbar />
@@ -156,18 +145,15 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     </>
   );
 
-  // status comes as BigInt from ethers — coerce to number for comparisons
   const statusNum    = Number(campaign.status);
   const progress     = pct(campaign.raised, campaign.goal);
   const isCreator    = !!address && address.toLowerCase() === campaign.creator.toLowerCase();
-  const isBacker     = myContrib > BigInt(0);
+  const isBacker     = myContrib > 0n;
   const deadlinePast = Date.now() / 1000 >= Number(campaign.deadline);
+  const isActive     = statusNum === 0 && !deadlinePast;
   const canFinalise  = statusNum === 0 && deadlinePast;
   const canRefund    = statusNum === 2 && isBacker && !refunded;
   const completedMs  = milestones.filter(m => m.completed).length;
-
-  // "Active" = status 0 AND deadline not yet passed
-  const isActive = statusNum === 0 && !deadlinePast;
 
   return (
     <>
@@ -179,7 +165,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           ← All Campaigns
         </Link>
 
-        {/* Title + status */}
+        {/* Title */}
         <div className="space-y-1">
           <span className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-medium ${STATUS_COLOR[statusNum as 0|1|2|3]}`}>
             {STATUS_LABEL[statusNum]}
@@ -194,7 +180,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           )}
         </div>
 
-        {/* Progress card */}
+        {/* Progress */}
         <div className="rounded-xl bg-gray-900 border border-gray-800 p-5 space-y-4">
           <div className="space-y-1">
             <div className="flex justify-between text-xs">
@@ -226,40 +212,31 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           </div>
         </div>
 
-        {/* ── FUND SECTION — shown whenever campaign is Active ──────────── */}
+        {/* Fund section */}
         {isActive && (
           <div className="rounded-xl bg-gray-900 border border-gray-800 p-5 space-y-3">
             <h2 className="font-semibold text-white">Back this campaign</h2>
 
-            {/* show previous contribution */}
             {isBacker && (
               <p className="text-xs text-gray-400">
-                You&apos;ve contributed{" "}
-                <span className="text-white font-medium">{fmt(myContrib)}</span> so far.
+                You&apos;ve contributed <span className="text-white font-medium">{fmt(myContrib)}</span> so far.
               </p>
             )}
 
-            {/* Not connected → show connect button */}
             {!isConnected ? (
               <div className="space-y-2">
                 <p className="text-sm text-gray-400">Connect your wallet to contribute.</p>
                 <ConnectButton />
               </div>
-
             ) : isCreator ? (
-              /* Creator can't fund own campaign */
               <p className="rounded-lg border border-yellow-800/40 bg-yellow-900/20 px-3 py-2 text-sm text-yellow-400">
                 You are the creator — you cannot fund your own campaign.
               </p>
-
             ) : (
-              /* ── THE FUND FORM ─────────────────────────────────────── */
               <form onSubmit={contribute}>
                 <div className="flex rounded-lg overflow-hidden border border-gray-600 focus-within:border-red-500 transition-colors">
                   <input
-                    type="number"
-                    step="any"
-                    min="0.000001"
+                    type="number" step="any" min="0.000001"
                     placeholder="Amount in ETH"
                     value={ethAmt}
                     onChange={e => setEthAmt(e.target.value)}
@@ -277,32 +254,26 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
-                  MetaMask will ask you to sign this transaction on Sepolia.
+                  Your wallet will ask you to sign this transaction on Sepolia.
                 </p>
               </form>
             )}
           </div>
         )}
 
-        {/* Finalise after deadline */}
         {canFinalise && (
           <div className="rounded-xl bg-gray-900 border border-gray-800 p-4 space-y-2">
-            <p className="text-sm text-gray-300">
-              Deadline passed. Finalise to unlock milestones or enable refunds.
-            </p>
-            <Btn variant="outline" loading={busy}
-              onClick={() => runTx(cf => cf.finaliseCampaign(campaignId))}>
+            <p className="text-sm text-gray-300">Deadline passed — finalise to unlock milestones or enable refunds.</p>
+            <Btn variant="outline" loading={busy} onClick={() => runTx(cf => cf.finaliseCampaign(campaignId))}>
               Finalise Campaign
             </Btn>
           </div>
         )}
 
-        {/* Refund for failed campaign */}
         {canRefund && (
           <div className="rounded-xl bg-gray-900 border border-red-900/50 p-4 space-y-2">
             <p className="text-sm text-red-400">This campaign failed — claim your refund.</p>
-            <Btn variant="danger" loading={busy}
-              onClick={() => runTx(cf => cf.claimRefund(campaignId))}>
+            <Btn variant="danger" loading={busy} onClick={() => runTx(cf => cf.claimRefund(campaignId))}>
               Claim Refund ({fmt(myContrib)})
             </Btn>
           </div>
@@ -312,7 +283,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           <p className="text-center text-sm text-gray-500">Refund already claimed.</p>
         )}
 
-        {/* ── MILESTONES ────────────────────────────────────────────────── */}
+        {/* Milestones */}
         <div className="space-y-3">
           <h2 className="font-semibold text-white">
             Milestones{" "}

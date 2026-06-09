@@ -1,14 +1,11 @@
 "use client";
-import { useAccount } from "wagmi";
 import { getWriteContract } from "./contract";
 
 /**
- * Returns a function that resolves to an ethers Contract signed by
- * whichever account is active in MetaMask — no address pinning.
- * Returns null when no wallet is connected.
+ * Always returns the getter — wallet check happens inside getWriteContract()
+ * at call time, not at render time. This avoids the SSR hydration issue where
+ * isConnected is false on first render even when the wallet IS connected.
  */
 export function useWriteContract() {
-  const { isConnected } = useAccount();
-  if (!isConnected) return null;
   return () => getWriteContract();
 }

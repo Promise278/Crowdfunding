@@ -35,67 +35,35 @@ export const STATUS_COLOR = [
   "bg-purple-100 text-purple-700 border-purple-200",
 ];
 
-// Public Sepolia RPC endpoints — no API key needed, always available
-const PUBLIC_RPCS = [
-  "https://rpc.sepolia.org",
-  "https://rpc2.sepolia.org",
-  "https://ethereum-sepolia-rpc.publicnode.com",
-];
-
-/**
- * Read-only contract.
- * - In browser: uses MetaMask if available (fastest, already on right chain)
- * - Fallback: tries public RPCs in order
- */
+/** Read-only contract — uses public Sepolia RPC, works everywhere including SSR */
 export async function getReadContract() {
-  // Browser + MetaMask available → use it directly (no key needed, no lag)
-  if (typeof window !== "undefined" && (window as any).ethereum) { // eslint-disable-line @typescript-eslint/no-explicit-any
-    try {
-      const provider = new ethers.BrowserProvider((window as any).ethereum); // eslint-disable-line @typescript-eslint/no-explicit-any
-      return new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
-    } catch { /* fall through to public RPC */ }
-  }
-
-  // SSR or no wallet — use public RPC
-  const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL ?? PUBLIC_RPCS[0];
+  const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.sepolia.org";
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 }
 
 /**
- * Find the MetaMask EIP-1193 provider specifically.
- * Walks window.ethereum.providers[] when multiple wallets are installed.
+ * Write contract — calls window.ethereum directly.
+ * Works with MetaMask, Coinbase Wallet, Brave Wallet, any injected EIP-1193 provider.
+ * The connected RainbowKit wallet is always window.ethereum after the user approves.
  */
-function getMetaMaskProvider(): ethers.Eip1193Provider {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const eth = (window as any).ethereum;
-  if (!eth) throw new Error("No wallet found. Please install MetaMask.");
-
-  // Multiple wallets — find MetaMask specifically
-  if (Array.isArray(eth.providers)) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mm = eth.providers.find((p: any) => p.isMetaMask && !p.isPhantom);
-    if (mm) return mm;
-    // fallback: any MetaMask-like provider
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const any = eth.providers.find((p: any) => p.isMetaMask);
-    if (any) return any;
+export async function getWriteContract(): Promise<ethers.Contract> {
+  if (typeof window === "undefined") {
+    throw new Error("Cannot sign transactions on the server.");
   }
 
-  // Single wallet
-  if (eth.isMetaMask) return eth;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const win = window as any;
 
-  // Last resort — use whatever is injected
-  return eth;
-}
+  if (!win.ethereum) {
+    throw new Error("No wallet detected. Please install MetaMask.");
+  }
 
-/**
- * Write contract — uses MetaMask to sign transactions.
- */
-export async function getWriteContract() {
-  const mmProvider = getMetaMaskProvider();
-  const provider   = new ethers.BrowserProvider(mmProvider);
-  await provider.send("eth_requestAccounts", []);
-  const signer = await provider.getSigner();
+  // Request account access — this triggers the MetaMask popup if not already connected
+  await win.ethereum.request({ method: "eth_requestAccounts" });
+
+  const provider = new ethers.BrowserProvider(win.ethereum);
+  const signer   = await provider.getSigner();
+
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 }
