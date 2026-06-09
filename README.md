@@ -183,7 +183,7 @@ npm install
 Create a `.env.local` file:
 
 ```env
-NEXT_PUBLIC_CONTRACT_ADDRESS=0xYourDeployedContractAddress
+NEXT_PUBLIC_CONTRACT_ADDRESS=0xD20d22B00dceD256b72334B695C6E8F80De0633C
 NEXT_PUBLIC_SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_INFURA_KEY
 ```
 
@@ -247,9 +247,9 @@ npx hardhat verify --network sepolia <DEPLOYED_CONTRACT_ADDRESS>
 
 | Network | Address |
 |---|---|
-| Ethereum Sepolia | `0x` *(add after deployment)* |
+| Ethereum Sepolia | `0xD20d22B00dceD256b72334B695C6E8F80De0633C` |
 
-View on Etherscan: `https://sepolia.etherscan.io/address/<CONTRACT_ADDRESS>`
+View on Etherscan: `https://sepolia.etherscan.io/address/0xD20d22B00dceD256b72334B695C6E8F80De0633C`
 
 ---
 
