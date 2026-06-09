@@ -28,8 +28,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
   const [ethAmt,     setEthAmt]     = useState("");
   const [funding,    setFunding]    = useState(false);
   const [busy,       setBusy]       = useState(false);
+  const [debugInfo,  setDebugInfo]  = useState("");
 
-  /* ── helpers ─────────────────────────────────────────────────────────── */
   function normCampaign(c: Record<string, unknown>): Campaign {
     return {
       creator:          String(c.creator),
@@ -43,7 +43,6 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     };
   }
 
-  /* ── load data ───────────────────────────────────────────────────────── */
   const load = useCallback(async () => {
     try {
       const cf = await getReadContract();
@@ -51,7 +50,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         cf.getCampaign(campaignId),
         cf.getMilestones(campaignId),
       ]);
-      setCampaign(normCampaign(c));
+      const normed = normCampaign(c);
+      setCampaign(normed);
       setMilestones([...ms]);
       if (address) {
         const [contrib, wasRefunded] = await Promise.all([
@@ -63,6 +63,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
       }
     } catch (e) {
       console.error("load error", e);
+      show("Failed to load campaign: " + String(e), "err");
     } finally {
       setLoading(false);
     }
@@ -70,65 +71,104 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
   useEffect(() => { load(); }, [load]);
 
-  /* ── contribute ──────────────────────────────────────────────────────── */
-  async function contribute(e: React.FormEvent) {
+  /* ── CONTRIBUTE ──────────────────────────────────────────────────────── */
+  async function contribute(e: React.SyntheticEvent) {
     e.preventDefault();
+
     const amt = parseFloat(ethAmt);
-    if (!ethAmt || isNaN(amt) || amt <= 0) return show("Enter a valid ETH amount", "err");
+    if (!ethAmt || isNaN(amt) || amt <= 0) {
+      return show("Enter a valid ETH amount", "err");
+    }
 
     setFunding(true);
+    setDebugInfo("Starting…");
+
     try {
-      const cf = await getWriteContract();      // triggers MetaMask popup
-      const tx = await cf.contribute(campaignId, { value: ethers.parseEther(ethAmt) });
-      show("⏳ Waiting for confirmation…");
-      await tx.wait();
+      // Step 1: get signer
+      setDebugInfo("Requesting wallet…");
+      const cf = await getWriteContract();
+      setDebugInfo("Wallet connected. Sending tx…");
 
-      // Read updated state from the same provider that just confirmed the tx
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mmProvider = new ethers.BrowserProvider((window as any).ethereum);
-      const freshCf    = new ethers.Contract(CONTRACT_ADDRESS, ABI, mmProvider);
+      // Step 2: send transaction
+      const weiValue = ethers.parseEther(ethAmt);
+      const tx = await cf.contribute(campaignId, { value: weiValue });
+      setDebugInfo(`Tx sent: ${tx.hash}. Waiting…`);
+      show("⏳ Transaction sent — waiting for confirmation…");
 
-      // Retry until raised increases (node may be 1-2 blocks behind)
-      let updated = await freshCf.getCampaign(campaignId);
-      for (let i = 0; i < 6 && BigInt(updated.raised) <= (campaign?.raised ?? 0n); i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        updated = await freshCf.getCampaign(campaignId);
+      // Step 3: wait for confirmation
+      const receipt = await tx.wait();
+      setDebugInfo(`Confirmed in block ${receipt?.blockNumber}`);
+
+      // Step 4: re-read campaign from public RPC (reliable)
+      setDebugInfo("Reading updated campaign…");
+      const prevRaised = campaign?.raised ?? 0n;
+      let newRaised    = prevRaised;
+      let newCount     = campaign?.contributorCount ?? 0n;
+
+      // Poll up to 10 times every 3s
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const reader  = await getReadContract();
+          const updated = await reader.getCampaign(campaignId);
+          newRaised = BigInt(updated.raised);
+          newCount  = BigInt(updated.contributorCount);
+          if (newRaised > prevRaised) break;
+        } catch { /* keep polling */ }
       }
 
-      setCampaign(normCampaign(updated));
-      const signer = await mmProvider.getSigner();
-      setMyContrib(BigInt(await freshCf.getContribution(campaignId, signer.address)));
+      // Step 5: update UI
+      setCampaign(prev => prev ? {
+        ...prev,
+        raised:           newRaised,
+        contributorCount: newCount,
+      } : prev);
+
+      if (address) {
+        try {
+          const reader     = await getReadContract();
+          const newContrib = await reader.getContribution(campaignId, address);
+          setMyContrib(BigInt(newContrib));
+        } catch { /* ignore */ }
+      }
+
       setEthAmt("");
-      show(`🎉 Funded! Total raised: ${ethers.formatEther(BigInt(updated.raised))} ETH`);
+      setDebugInfo("");
+      show(`🎉 Funded! New total: ${ethers.formatEther(newRaised)} ETH`);
+
     } catch (err: unknown) {
-      const raw    = err instanceof Error ? err.message : String(err);
-      const reason = raw.match(/reason="([^"]+)"/)?.[1]
-                  ?? raw.match(/reverted with reason string '([^']+)'/)?.[1]
-                  ?? raw.match(/execution reverted: ([^\n]+)/)?.[1]
-                  ?? raw.slice(0, 150);
+      const raw = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error("contribute error:", err);
+      setDebugInfo("Error: " + raw.slice(0, 200));
+
+      // Parse the revert reason
+      const reason =
+        raw.match(/reason="([^"]+)"/)?.[1] ??
+        raw.match(/reverted with reason string '([^']+)'/)?.[1] ??
+        raw.match(/"message":"([^"]+)"/)?.[1] ??
+        raw.slice(0, 200);
       show(reason, "err");
-    } finally { setFunding(false); }
+    } finally {
+      setFunding(false);
+    }
   }
 
-  /* ── other transactions ──────────────────────────────────────────────── */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function runTx(fn: (cf: any) => Promise<{ wait: () => Promise<unknown> }>) {
+  async function runTx(fn: (cf: ethers.Contract) => Promise<ethers.ContractTransactionResponse>) {
     setBusy(true);
     try {
       const cf = await getWriteContract();
-      await (await fn(cf)).wait();
+      const tx = await fn(cf);
+      await tx.wait();
       show("Done ✓");
       load();
     } catch (err: unknown) {
       const raw    = err instanceof Error ? err.message : String(err);
-      const reason = raw.match(/reason="([^"]+)"/)?.[1]
-                  ?? raw.match(/reverted with reason string '([^']+)'/)?.[1]
-                  ?? raw.slice(0, 150);
+      const reason = raw.match(/reason="([^"]+)"/)?.[1] ?? raw.slice(0, 150);
       show(reason, "err");
     } finally { setBusy(false); }
   }
 
-  /* ── render guards ───────────────────────────────────────────────────── */
+  /* ── RENDER ──────────────────────────────────────────────────────────── */
   if (loading) return (
     <>
       <Navbar />
@@ -212,7 +252,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           </div>
         </div>
 
-        {/* Fund section */}
+        {/* ── FUND SECTION — always show for active, regardless of wallet state ── */}
         {isActive && (
           <div className="rounded-xl bg-gray-900 border border-gray-800 p-5 space-y-3">
             <h2 className="font-semibold text-white">Back this campaign</h2>
@@ -223,41 +263,67 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
               </p>
             )}
 
-            {!isConnected ? (
-              <div className="space-y-2">
-                <p className="text-sm text-gray-400">Connect your wallet to contribute.</p>
-                <ConnectButton />
-              </div>
-            ) : isCreator ? (
+            {/* Show form to everyone — wallet check happens on submit */}
+            {isCreator ? (
               <p className="rounded-lg border border-yellow-800/40 bg-yellow-900/20 px-3 py-2 text-sm text-yellow-400">
                 You are the creator — you cannot fund your own campaign.
               </p>
             ) : (
-              <form onSubmit={contribute}>
-                <div className="flex rounded-lg overflow-hidden border border-gray-600 focus-within:border-red-500 transition-colors">
-                  <input
-                    type="number" step="any" min="0.000001"
-                    placeholder="Amount in ETH"
-                    value={ethAmt}
-                    onChange={e => setEthAmt(e.target.value)}
-                    required
-                    className="flex-1 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none min-w-0"
-                  />
-                  <button
-                    type="submit"
-                    disabled={funding}
-                    className="shrink-0 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 text-sm font-semibold text-white transition-colors"
-                  >
-                    {funding
-                      ? <span className="h-4 w-4 inline-block animate-spin rounded-full border-2 border-white border-t-transparent" />
-                      : "Fund →"}
-                  </button>
-                </div>
-                <p className="mt-2 text-xs text-gray-500">
-                  Your wallet will ask you to sign this transaction on Sepolia.
-                </p>
-              </form>
+              <div className="space-y-3">
+                {/* Connect wallet prompt if not connected */}
+                {!isConnected && (
+                  <div className="flex items-center gap-3 rounded-lg bg-gray-800 px-3 py-2">
+                    <p className="text-xs text-gray-400 flex-1">Connect wallet to fund</p>
+                    <ConnectButton />
+                  </div>
+                )}
+
+                {/* Fund form — always rendered so it's always visible */}
+                <form onSubmit={contribute}>
+                  <div className="flex rounded-lg overflow-hidden border border-gray-600 focus-within:border-red-500 transition-colors">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.000001"
+                      placeholder="Amount in ETH"
+                      value={ethAmt}
+                      onChange={e => setEthAmt(e.target.value)}
+                      required
+                      className="flex-1 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none min-w-0"
+                    />
+                    <button
+                      type="submit"
+                      disabled={funding}
+                      className="shrink-0 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 text-sm font-semibold text-white transition-colors"
+                    >
+                      {funding
+                        ? <span className="h-4 w-4 inline-block animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        : "Fund →"}
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Your wallet will sign this on Sepolia testnet.
+                  </p>
+                </form>
+
+                {/* Debug info */}
+                {debugInfo && (
+                  <p className="rounded bg-gray-800 px-3 py-1.5 text-xs text-yellow-400 font-mono break-all">
+                    {debugInfo}
+                  </p>
+                )}
+              </div>
             )}
+          </div>
+        )}
+
+        {/* Campaign ended but not failed */}
+        {!isActive && statusNum === 0 && deadlinePast && (
+          <div className="rounded-xl bg-gray-900 border border-gray-800 p-4">
+            <p className="text-sm text-gray-400 mb-3">Deadline passed. Finalise this campaign.</p>
+            <Btn variant="outline" loading={busy} onClick={() => runTx(cf => cf.finaliseCampaign(campaignId))}>
+              Finalise Campaign
+            </Btn>
           </div>
         )}
 

@@ -5,40 +5,61 @@ import { Btn, Input, Label, Modal, Textarea, useToast } from "./ui";
 import { getWriteContract } from "@/lib/contract";
 
 export default function CreateCampaign({ onCreated }: { onCreated: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const { show, Toast } = useToast();
-  const [form, setForm] = useState({ title: "", desc: "", goal: "", days: "" });
+  const [open,  setOpen]  = useState(false);
+  const [busy,  setBusy]  = useState(false);
+  const [debug, setDebug] = useState("");
+  const { show, Toast }   = useToast();
+  const [form, setForm]   = useState({ title: "", desc: "", goal: "", days: "" });
 
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-    setForm(f => ({ ...f, [k]: e.target.value }));
+  const set = (k: string) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setForm(f => ({ ...f, [k]: e.target.value }));
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: React.SyntheticEvent) {
     e.preventDefault();
-    if (!form.title || !form.goal || !form.days) return show("Fill all fields", "err");
+    if (!form.title || !form.goal || !form.days) {
+      return show("Fill all fields", "err");
+    }
 
     setBusy(true);
+    setDebug("Starting…");
+
     try {
-      // getWriteContract() calls eth_requestAccounts — MetaMask pops up here
+      // Step 1 – connect wallet
+      setDebug("Requesting wallet access…");
       const cf = await getWriteContract();
+      setDebug("Wallet ready. Sending transaction…");
+
+      // Step 2 – send tx
       const tx = await cf.createCampaign(
         form.title,
         form.desc,
         ethers.parseEther(form.goal),
         Number(form.days)
       );
-      show("⏳ Waiting for confirmation…");
-      await tx.wait();
+      setDebug(`Tx sent: ${tx.hash}. Waiting for confirmation…`);
+      show("⏳ Transaction sent — waiting for confirmation…");
+
+      // Step 3 – wait
+      const receipt = await tx.wait();
+      setDebug(`Confirmed in block ${receipt?.blockNumber} ✓`);
+
       show("🎉 Campaign created!");
       setOpen(false);
+      setDebug("");
       setForm({ title: "", desc: "", goal: "", days: "" });
       onCreated();
+
     } catch (err: unknown) {
-      const msg    = err instanceof Error ? err.message : String(err);
-      const reason = msg.match(/reason="([^"]+)"/)?.[1]
-                  ?? msg.match(/reverted with reason string '([^']+)'/)?.[1]
-                  ?? msg.match(/execution reverted: ([^\n]+)/)?.[1]
-                  ?? msg.slice(0, 150);
+      const raw = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error("createCampaign error:", err);
+      setDebug("Error: " + raw.slice(0, 300));
+
+      const reason =
+        raw.match(/reason="([^"]+)"/)?.[1] ??
+        raw.match(/reverted with reason string '([^']+)'/)?.[1] ??
+        raw.match(/"message":"([^"]+)"/)?.[1] ??
+        raw.slice(0, 200);
       show(reason, "err");
     } finally {
       setBusy(false);
@@ -48,11 +69,10 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
   return (
     <>
       {Toast}
-      {/* Button is always enabled — wallet check happens on click */}
       <Btn onClick={() => setOpen(true)}>+ New Campaign</Btn>
 
       {open && (
-        <Modal title="Create Campaign" onClose={() => setOpen(false)}>
+        <Modal title="Create Campaign" onClose={() => { setOpen(false); setDebug(""); }}>
           <form onSubmit={submit} className="space-y-4">
             <div>
               <Label>Title</Label>
@@ -94,14 +114,23 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
                 />
               </div>
             </div>
+
+            {/* Debug strip */}
+            {debug && (
+              <p className="rounded bg-gray-800 px-3 py-2 text-xs text-yellow-400 font-mono break-all">
+                {debug}
+              </p>
+            )}
+
             <p className="text-xs text-gray-500">
-              Your connected wallet will be asked to sign this transaction.
+              Your connected wallet will sign this transaction on Sepolia.
             </p>
+
             <div className="flex gap-2 pt-1">
               <Btn type="submit" loading={busy} className="flex-1">
                 Create &amp; Sign
               </Btn>
-              <Btn type="button" variant="outline" onClick={() => setOpen(false)}>
+              <Btn type="button" variant="outline" onClick={() => { setOpen(false); setDebug(""); }}>
                 Cancel
               </Btn>
             </div>
