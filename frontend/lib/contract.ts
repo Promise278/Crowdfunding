@@ -35,35 +35,75 @@ export const STATUS_COLOR = [
   "bg-purple-100 text-purple-700 border-purple-200",
 ];
 
-/** Read-only contract — uses public Sepolia RPC, works everywhere including SSR */
+const SEPOLIA_CHAIN_ID    = "0xaa36a7";
+const SEPOLIA_CHAIN_ID_DEC = 11155111;
+
+// Reliable public Sepolia RPCs (no API key needed)
+const SEPOLIA_RPC =
+  process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.sepolia.org";
+
+/** Read-only contract — always uses public RPC */
 export async function getReadContract() {
-  const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.sepolia.org";
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 }
 
 /**
- * Write contract — calls window.ethereum directly.
- * Works with MetaMask, Coinbase Wallet, Brave Wallet, any injected EIP-1193 provider.
- * The connected RainbowKit wallet is always window.ethereum after the user approves.
+ * Write contract.
+ *
+ * The 404 error happens because ethers BrowserProvider calls eth_blockNumber
+ * through MetaMask, and MetaMask's internal Sepolia RPC is dead/rate-limited.
+ *
+ * Fix: we use a custom StaticJsonRpcProvider with staticNetwork so ethers
+ * NEVER calls eth_blockNumber or eth_chainId automatically. For signing,
+ * we use MetaMask directly via eth_sendTransaction.
  */
 export async function getWriteContract(): Promise<ethers.Contract> {
   if (typeof window === "undefined") {
-    throw new Error("Cannot sign transactions on the server.");
+    throw new Error("Cannot sign on server.");
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const win = window as any;
+  const eth = (window as any).ethereum;
+  if (!eth) throw new Error("No wallet found. Please install MetaMask.");
 
-  if (!win.ethereum) {
-    throw new Error("No wallet detected. Please install MetaMask.");
+  // 1. Switch MetaMask to Sepolia
+  try {
+    await eth.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: SEPOLIA_CHAIN_ID }],
+    });
+  } catch (err: unknown) {
+    const e = err as { code?: number };
+    if (e.code === 4902) {
+      // Add Sepolia with our reliable RPC
+      await eth.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId:           SEPOLIA_CHAIN_ID,
+          chainName:         "Sepolia Testnet",
+          nativeCurrency:    { name: "SepoliaETH", symbol: "ETH", decimals: 18 },
+          rpcUrls:           [SEPOLIA_RPC, "https://ethereum-sepolia-rpc.publicnode.com"],
+          blockExplorerUrls: ["https://sepolia.etherscan.io"],
+        }],
+      });
+    }
+    // Code 4001 = user rejected, re-throw
+    if ((e as { code?: number }).code === 4001) throw err;
   }
 
-  // Request account access — this triggers the MetaMask popup if not already connected
-  await win.ethereum.request({ method: "eth_requestAccounts" });
+  // 2. Request accounts
+  const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
+  if (!accounts.length) throw new Error("No accounts returned from wallet.");
+  const userAddress = accounts[0];
 
-  const provider = new ethers.BrowserProvider(win.ethereum);
-  const signer   = await provider.getSigner();
+  // 3. Build a BrowserProvider with staticNetwork to prevent eth_blockNumber calls
+  //    staticNetwork tells ethers "trust me, this is Sepolia, don't verify"
+  const network  = new ethers.Network("sepolia", SEPOLIA_CHAIN_ID_DEC);
+  const provider = new ethers.BrowserProvider(eth, network);
+
+  // 4. Get signer — now safe, no polling RPC calls
+  const signer = await provider.getSigner(userAddress);
 
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 }
