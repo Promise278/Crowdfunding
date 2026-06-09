@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { ethers } from "ethers";
 import { Btn, Input, Label, Modal, useToast } from "./ui";
-import { getWriteContract } from "@/lib/contract";
+import { sendContractTx, waitForTx } from "@/lib/contract";
 
 export default function FundModal({ id, onDone }: { id: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
@@ -10,25 +10,23 @@ export default function FundModal({ id, onDone }: { id: number; onDone: () => vo
   const [busy, setBusy] = useState(false);
   const { show, Toast } = useToast();
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: React.SyntheticEvent) {
     e.preventDefault();
     const amt = parseFloat(eth);
     if (!eth || isNaN(amt) || amt <= 0) return show("Enter a valid ETH amount", "err");
     setBusy(true);
     try {
-      const cf = await getWriteContract();
-      const tx = await cf.contribute(id, { value: ethers.parseEther(eth) });
+      const txHash = await sendContractTx("contribute", [id], ethers.parseEther(eth));
       show("⏳ Waiting for confirmation…");
-      await tx.wait();
+      const receipt = await waitForTx(txHash);
+      if (!receipt) throw new Error("Timed out.");
       show("🎉 Contribution sent!");
       setOpen(false);
       setEth("");
       onDone();
     } catch (err: unknown) {
-      const msg    = err instanceof Error ? err.message : String(err);
-      const reason = msg.match(/reason="([^"]+)"/)?.[1]
-                  ?? msg.match(/reverted with reason string '([^']+)'/)?.[1]
-                  ?? msg.slice(0, 150);
+      const raw    = err instanceof Error ? err.message : String(err);
+      const reason = raw.match(/reason="([^"]+)"/)?.[1] ?? raw.slice(0, 150);
       show(reason, "err");
     } finally { setBusy(false); }
   }

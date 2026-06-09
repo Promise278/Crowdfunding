@@ -6,7 +6,7 @@ import Link from "next/link";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
   Campaign, Milestone, STATUS_COLOR, STATUS_LABEL,
-  getReadContract, getWriteContract, CONTRACT_ADDRESS, ABI,
+  getReadContract, sendContractTx, waitForTx,
 } from "@/lib/contract";
 import { fmt, fmtDate, pct, shortAddr, timeLeft } from "@/lib/utils";
 import Navbar from "@/components/Navbar";
@@ -50,8 +50,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         cf.getCampaign(campaignId),
         cf.getMilestones(campaignId),
       ]);
-      const normed = normCampaign(c);
-      setCampaign(normed);
+      setCampaign(normCampaign(c));
       setMilestones([...ms]);
       if (address) {
         const [contrib, wasRefunded] = await Promise.all([
@@ -63,7 +62,6 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
       }
     } catch (e) {
       console.error("load error", e);
-      show("Failed to load campaign: " + String(e), "err");
     } finally {
       setLoading(false);
     }
@@ -71,42 +69,33 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
   useEffect(() => { load(); }, [load]);
 
-  /* ── CONTRIBUTE ──────────────────────────────────────────────────────── */
+  /* ── contribute ──────────────────────────────────────────────────────── */
   async function contribute(e: React.SyntheticEvent) {
     e.preventDefault();
-
     const amt = parseFloat(ethAmt);
-    if (!ethAmt || isNaN(amt) || amt <= 0) {
-      return show("Enter a valid ETH amount", "err");
-    }
+    if (!ethAmt || isNaN(amt) || amt <= 0) return show("Enter a valid ETH amount", "err");
 
     setFunding(true);
-    setDebugInfo("Starting…");
+    setDebugInfo("Requesting wallet…");
 
     try {
-      // Step 1: get signer
-      setDebugInfo("Requesting wallet…");
-      const cf = await getWriteContract();
-      setDebugInfo("Wallet connected. Sending tx…");
-
-      // Step 2: send transaction
       const weiValue = ethers.parseEther(ethAmt);
-      const tx = await cf.contribute(campaignId, { value: weiValue });
-      setDebugInfo(`Tx sent: ${tx.hash}. Waiting…`);
+
+      setDebugInfo("MetaMask signing — please approve in your wallet…");
+      const txHash = await sendContractTx("contribute", [campaignId], weiValue);
+
+      setDebugInfo(`Tx: ${txHash.slice(0, 20)}… waiting for confirmation…`);
       show("⏳ Transaction sent — waiting for confirmation…");
 
-      // Step 3: wait for confirmation
-      const receipt = await tx.wait();
-      setDebugInfo(`Confirmed in block ${receipt?.blockNumber}`);
+      const receipt = await waitForTx(txHash);
+      if (!receipt) throw new Error("Timed out — check Sepolia Etherscan.");
+      setDebugInfo(`✓ Confirmed in block ${receipt.blockNumber}`);
 
-      // Step 4: re-read campaign from public RPC (reliable)
-      setDebugInfo("Reading updated campaign…");
       const prevRaised = campaign?.raised ?? 0n;
-      let newRaised    = prevRaised;
-      let newCount     = campaign?.contributorCount ?? 0n;
+      let newRaised = prevRaised;
+      let newCount  = campaign?.contributorCount ?? 0n;
 
-      // Poll up to 10 times every 3s
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 6; i++) {
         await new Promise(r => setTimeout(r, 3000));
         try {
           const reader  = await getReadContract();
@@ -117,48 +106,40 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         } catch { /* keep polling */ }
       }
 
-      // Step 5: update UI
-      setCampaign(prev => prev ? {
-        ...prev,
-        raised:           newRaised,
-        contributorCount: newCount,
-      } : prev);
+      setCampaign(prev => prev ? { ...prev, raised: newRaised, contributorCount: newCount } : prev);
 
       if (address) {
         try {
-          const reader     = await getReadContract();
-          const newContrib = await reader.getContribution(campaignId, address);
-          setMyContrib(BigInt(newContrib));
+          const reader = await getReadContract();
+          setMyContrib(BigInt(await reader.getContribution(campaignId, address)));
         } catch { /* ignore */ }
       }
 
       setEthAmt("");
       setDebugInfo("");
-      show(`🎉 Funded! New total: ${ethers.formatEther(newRaised)} ETH`);
+      show(`🎉 Funded! Total raised: ${ethers.formatEther(newRaised)} ETH`);
 
     } catch (err: unknown) {
       const raw = err instanceof Error ? err.message : JSON.stringify(err);
       console.error("contribute error:", err);
       setDebugInfo("Error: " + raw.slice(0, 200));
-
-      // Parse the revert reason
       const reason =
         raw.match(/reason="([^"]+)"/)?.[1] ??
         raw.match(/reverted with reason string '([^']+)'/)?.[1] ??
         raw.match(/"message":"([^"]+)"/)?.[1] ??
         raw.slice(0, 200);
       show(reason, "err");
-    } finally {
-      setFunding(false);
-    }
+    } finally { setFunding(false); }
   }
 
-  async function runTx(fn: (cf: ethers.Contract) => Promise<ethers.ContractTransactionResponse>) {
+  /* ── other transactions ──────────────────────────────────────────────── */
+  async function runTx(method: string, args: unknown[]) {
     setBusy(true);
     try {
-      const cf = await getWriteContract();
-      const tx = await fn(cf);
-      await tx.wait();
+      const txHash = await sendContractTx(method, args);
+      show("⏳ Waiting for confirmation…");
+      const receipt = await waitForTx(txHash);
+      if (!receipt) throw new Error("Timed out.");
       show("Done ✓");
       load();
     } catch (err: unknown) {
@@ -168,7 +149,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     } finally { setBusy(false); }
   }
 
-  /* ── RENDER ──────────────────────────────────────────────────────────── */
+  /* ── render ──────────────────────────────────────────────────────────── */
   if (loading) return (
     <>
       <Navbar />
@@ -201,9 +182,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
       {Toast}
       <main className="mx-auto max-w-2xl px-4 py-10 space-y-5">
 
-        <Link href="/" className="text-xs text-gray-500 hover:text-indigo-400">
-          ← All Campaigns
-        </Link>
+        <Link href="/" className="text-xs text-gray-500 hover:text-indigo-400">← All Campaigns</Link>
 
         {/* Title */}
         <div className="space-y-1">
@@ -252,7 +231,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           </div>
         </div>
 
-        {/* ── FUND SECTION — always show for active, regardless of wallet state ── */}
+        {/* Fund section */}
         {isActive && (
           <div className="rounded-xl bg-gray-900 border border-gray-800 p-5 space-y-3">
             <h2 className="font-semibold text-white">Back this campaign</h2>
@@ -263,28 +242,22 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
               </p>
             )}
 
-            {/* Show form to everyone — wallet check happens on submit */}
             {isCreator ? (
               <p className="rounded-lg border border-yellow-800/40 bg-yellow-900/20 px-3 py-2 text-sm text-yellow-400">
                 You are the creator — you cannot fund your own campaign.
               </p>
             ) : (
               <div className="space-y-3">
-                {/* Connect wallet prompt if not connected */}
                 {!isConnected && (
                   <div className="flex items-center gap-3 rounded-lg bg-gray-800 px-3 py-2">
                     <p className="text-xs text-gray-400 flex-1">Connect wallet to fund</p>
                     <ConnectButton />
                   </div>
                 )}
-
-                {/* Fund form — always rendered so it's always visible */}
                 <form onSubmit={contribute}>
                   <div className="flex rounded-lg overflow-hidden border border-gray-600 focus-within:border-red-500 transition-colors">
                     <input
-                      type="number"
-                      step="any"
-                      min="0.000001"
+                      type="number" step="any" min="0.000001"
                       placeholder="Amount in ETH"
                       value={ethAmt}
                       onChange={e => setEthAmt(e.target.value)}
@@ -292,8 +265,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                       className="flex-1 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none min-w-0"
                     />
                     <button
-                      type="submit"
-                      disabled={funding}
+                      type="submit" disabled={funding}
                       className="shrink-0 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 text-sm font-semibold text-white transition-colors"
                     >
                       {funding
@@ -301,12 +273,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                         : "Fund →"}
                     </button>
                   </div>
-                  <p className="mt-1 text-xs text-gray-500">
-                    Your wallet will sign this on Sepolia testnet.
-                  </p>
+                  <p className="mt-1 text-xs text-gray-500">Your wallet will sign this on Sepolia.</p>
                 </form>
-
-                {/* Debug info */}
                 {debugInfo && (
                   <p className="rounded bg-gray-800 px-3 py-1.5 text-xs text-yellow-400 font-mono break-all">
                     {debugInfo}
@@ -317,20 +285,11 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           </div>
         )}
 
-        {/* Campaign ended but not failed */}
-        {!isActive && statusNum === 0 && deadlinePast && (
-          <div className="rounded-xl bg-gray-900 border border-gray-800 p-4">
-            <p className="text-sm text-gray-400 mb-3">Deadline passed. Finalise this campaign.</p>
-            <Btn variant="outline" loading={busy} onClick={() => runTx(cf => cf.finaliseCampaign(campaignId))}>
-              Finalise Campaign
-            </Btn>
-          </div>
-        )}
-
         {canFinalise && (
           <div className="rounded-xl bg-gray-900 border border-gray-800 p-4 space-y-2">
             <p className="text-sm text-gray-300">Deadline passed — finalise to unlock milestones or enable refunds.</p>
-            <Btn variant="outline" loading={busy} onClick={() => runTx(cf => cf.finaliseCampaign(campaignId))}>
+            <Btn variant="outline" loading={busy}
+              onClick={() => runTx("finaliseCampaign", [campaignId])}>
               Finalise Campaign
             </Btn>
           </div>
@@ -339,7 +298,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         {canRefund && (
           <div className="rounded-xl bg-gray-900 border border-red-900/50 p-4 space-y-2">
             <p className="text-sm text-red-400">This campaign failed — claim your refund.</p>
-            <Btn variant="danger" loading={busy} onClick={() => runTx(cf => cf.claimRefund(campaignId))}>
+            <Btn variant="danger" loading={busy}
+              onClick={() => runTx("claimRefund", [campaignId])}>
               Claim Refund ({fmt(myContrib)})
             </Btn>
           </div>
@@ -353,22 +313,15 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         <div className="space-y-3">
           <h2 className="font-semibold text-white">
             Milestones{" "}
-            <span className="text-sm font-normal text-gray-500">
-              ({completedMs}/{milestones.length} completed)
-            </span>
+            <span className="text-sm font-normal text-gray-500">({completedMs}/{milestones.length} completed)</span>
           </h2>
           <div className="rounded-xl bg-gray-900 border border-gray-800 overflow-hidden">
             {milestones.length === 0 ? (
-              <p className="py-8 text-center text-sm text-gray-500">
-                No milestones have been added yet.
-              </p>
+              <p className="py-8 text-center text-sm text-gray-500">No milestones have been added yet.</p>
             ) : (
               <MilestonePanel
-                id={campaignId}
-                campaign={campaign}
-                milestones={milestones}
-                myAddr={address ?? ""}
-                onRefresh={load}
+                id={campaignId} campaign={campaign} milestones={milestones}
+                myAddr={address ?? ""} onRefresh={load}
               />
             )}
           </div>

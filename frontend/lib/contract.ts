@@ -35,39 +35,51 @@ export const STATUS_COLOR = [
   "bg-purple-100 text-purple-700 border-purple-200",
 ];
 
-const SEPOLIA_CHAIN_ID    = "0xaa36a7";
+const SEPOLIA_CHAIN_ID = "0xaa36a7";
 const SEPOLIA_CHAIN_ID_DEC = 11155111;
 
-// Reliable public Sepolia RPCs (no API key needed)
-const SEPOLIA_RPC =
+// Reliable public RPC — no API key, no rate limiting
+export const SEPOLIA_RPC =
   process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.sepolia.org";
 
-/** Read-only contract — always uses public RPC */
+/** Read-only contract using the public RPC */
 export async function getReadContract() {
   const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 }
 
 /**
- * Write contract.
- *
- * The 404 error happens because ethers BrowserProvider calls eth_blockNumber
- * through MetaMask, and MetaMask's internal Sepolia RPC is dead/rate-limited.
- *
- * Fix: we use a custom StaticJsonRpcProvider with staticNetwork so ethers
- * NEVER calls eth_blockNumber or eth_chainId automatically. For signing,
- * we use MetaMask directly via eth_sendTransaction.
+ * Wait for a tx receipt using our OWN public RPC instead of MetaMask.
+ * This avoids the eth_blockNumber 404 error from MetaMask's dead RPC.
  */
-export async function getWriteContract(): Promise<ethers.Contract> {
-  if (typeof window === "undefined") {
-    throw new Error("Cannot sign on server.");
+export async function waitForTx(txHash: string): Promise<ethers.TransactionReceipt | null> {
+  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  // Poll every 3 seconds, up to 5 minutes
+  for (let i = 0; i < 100; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (receipt && receipt.blockNumber) return receipt;
   }
+  return null;
+}
+
+/**
+ * Send a raw transaction via MetaMask (signing only, no polling).
+ * Returns the tx hash immediately after MetaMask approves.
+ */
+export async function sendContractTx(
+  method: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: any[],
+  valueWei?: bigint
+): Promise<string> {
+  if (typeof window === "undefined") throw new Error("Browser only.");
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const eth = (window as any).ethereum;
   if (!eth) throw new Error("No wallet found. Please install MetaMask.");
 
-  // 1. Switch MetaMask to Sepolia
+  // 1. Switch to Sepolia
   try {
     await eth.request({
       method: "wallet_switchEthereumChain",
@@ -76,34 +88,49 @@ export async function getWriteContract(): Promise<ethers.Contract> {
   } catch (err: unknown) {
     const e = err as { code?: number };
     if (e.code === 4902) {
-      // Add Sepolia with our reliable RPC
       await eth.request({
         method: "wallet_addEthereumChain",
         params: [{
           chainId:           SEPOLIA_CHAIN_ID,
           chainName:         "Sepolia Testnet",
           nativeCurrency:    { name: "SepoliaETH", symbol: "ETH", decimals: 18 },
-          rpcUrls:           [SEPOLIA_RPC, "https://ethereum-sepolia-rpc.publicnode.com"],
+          rpcUrls:           [SEPOLIA_RPC],
           blockExplorerUrls: ["https://sepolia.etherscan.io"],
         }],
       });
     }
-    // Code 4001 = user rejected, re-throw
-    if ((e as { code?: number }).code === 4001) throw err;
+    if (e.code === 4001) throw new Error("User rejected network switch.");
   }
 
-  // 2. Request accounts
+  // 2. Get accounts
   const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
-  if (!accounts.length) throw new Error("No accounts returned from wallet.");
-  const userAddress = accounts[0];
+  if (!accounts.length) throw new Error("No accounts found.");
+  const from = accounts[0];
 
-  // 3. Build a BrowserProvider with staticNetwork to prevent eth_blockNumber calls
-  //    staticNetwork tells ethers "trust me, this is Sepolia, don't verify"
-  const network  = new ethers.Network("sepolia", SEPOLIA_CHAIN_ID_DEC);
-  const provider = new ethers.BrowserProvider(eth, network);
+  // 3. Encode the function call using the public RPC provider (no MetaMask polling)
+  const provider  = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const iface     = new ethers.Interface(ABI);
+  const data      = iface.encodeFunctionData(method, args);
 
-  // 4. Get signer — now safe, no polling RPC calls
-  const signer = await provider.getSigner(userAddress);
+  // 4. Estimate gas using the public RPC
+  const gasEstimate = await provider.estimateGas({
+    from,
+    to:    CONTRACT_ADDRESS,
+    data,
+    value: valueWei ?? 0n,
+  });
 
-  return new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+  // 5. Send via MetaMask (signing only) — returns tx hash immediately
+  const txHash: string = await eth.request({
+    method: "eth_sendTransaction",
+    params: [{
+      from,
+      to:    CONTRACT_ADDRESS,
+      data,
+      value: valueWei ? "0x" + valueWei.toString(16) : "0x0",
+      gas:   "0x" + (gasEstimate * 120n / 100n).toString(16), // +20% buffer
+    }],
+  });
+
+  return txHash;
 }

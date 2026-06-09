@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { ethers } from "ethers";
 import { Btn, Input, Label, Modal, Textarea, useToast } from "./ui";
-import { getWriteContract } from "@/lib/contract";
+import { sendContractTx, waitForTx } from "@/lib/contract";
 
 export default function CreateCampaign({ onCreated }: { onCreated: () => void }) {
   const [open,  setOpen]  = useState(false);
@@ -17,33 +17,26 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
 
   async function submit(e: React.SyntheticEvent) {
     e.preventDefault();
-    if (!form.title || !form.goal || !form.days) {
-      return show("Fill all fields", "err");
-    }
+    if (!form.title || !form.goal || !form.days) return show("Fill all fields", "err");
 
     setBusy(true);
-    setDebug("Starting…");
+    setDebug("Requesting wallet…");
 
     try {
-      // Step 1 – connect wallet
-      setDebug("Requesting wallet access…");
-      const cf = await getWriteContract();
-      setDebug("Wallet ready. Sending transaction…");
-
-      // Step 2 – send tx
-      const tx = await cf.createCampaign(
-        form.title,
-        form.desc,
-        ethers.parseEther(form.goal),
-        Number(form.days)
+      // Step 1: send tx via MetaMask (signing only, no polling)
+      setDebug("MetaMask signing — please approve…");
+      const txHash = await sendContractTx(
+        "createCampaign",
+        [form.title, form.desc, ethers.parseEther(form.goal), Number(form.days)]
       );
-      setDebug(`Tx sent: ${tx.hash}. Waiting for confirmation…`);
+      setDebug(`Tx sent: ${txHash.slice(0, 20)}… Waiting for confirmation…`);
       show("⏳ Transaction sent — waiting for confirmation…");
 
-      // Step 3 – wait
-      const receipt = await tx.wait();
-      setDebug(`Confirmed in block ${receipt?.blockNumber} ✓`);
+      // Step 2: wait using our own RPC (not MetaMask)
+      const receipt = await waitForTx(txHash);
+      if (!receipt) throw new Error("Transaction timed out — check Sepolia Etherscan.");
 
+      setDebug(`✓ Confirmed in block ${receipt.blockNumber}`);
       show("🎉 Campaign created!");
       setOpen(false);
       setDebug("");
@@ -54,7 +47,6 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
       const raw = err instanceof Error ? err.message : JSON.stringify(err);
       console.error("createCampaign error:", err);
       setDebug("Error: " + raw.slice(0, 300));
-
       const reason =
         raw.match(/reason="([^"]+)"/)?.[1] ??
         raw.match(/reverted with reason string '([^']+)'/)?.[1] ??
@@ -76,63 +68,35 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
           <form onSubmit={submit} className="space-y-4">
             <div>
               <Label>Title</Label>
-              <Input
-                placeholder="My awesome project"
-                value={form.title}
-                onChange={set("title")}
-                required
-              />
+              <Input placeholder="My awesome project" value={form.title} onChange={set("title")} required />
             </div>
             <div>
               <Label>Description</Label>
-              <Textarea
-                rows={3}
-                placeholder="What are you building?"
-                value={form.desc}
-                onChange={set("desc")}
-              />
+              <Textarea rows={3} placeholder="What are you building?" value={form.desc} onChange={set("desc")} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Goal (ETH)</Label>
-                <Input
-                  type="number" step="any" min="0.001"
-                  placeholder="1.0"
-                  value={form.goal}
-                  onChange={set("goal")}
-                  required
-                />
+                <Input type="number" step="any" min="0.001" placeholder="1.0"
+                  value={form.goal} onChange={set("goal")} required />
               </div>
               <div>
                 <Label>Duration (days)</Label>
-                <Input
-                  type="number" min="1" max="365"
-                  placeholder="30"
-                  value={form.days}
-                  onChange={set("days")}
-                  required
-                />
+                <Input type="number" min="1" max="365" placeholder="30"
+                  value={form.days} onChange={set("days")} required />
               </div>
             </div>
 
-            {/* Debug strip */}
             {debug && (
               <p className="rounded bg-gray-800 px-3 py-2 text-xs text-yellow-400 font-mono break-all">
                 {debug}
               </p>
             )}
 
-            <p className="text-xs text-gray-500">
-              Your connected wallet will sign this transaction on Sepolia.
-            </p>
-
+            <p className="text-xs text-gray-500">Your wallet will sign this on Sepolia.</p>
             <div className="flex gap-2 pt-1">
-              <Btn type="submit" loading={busy} className="flex-1">
-                Create &amp; Sign
-              </Btn>
-              <Btn type="button" variant="outline" onClick={() => { setOpen(false); setDebug(""); }}>
-                Cancel
-              </Btn>
+              <Btn type="submit" loading={busy} className="flex-1">Create &amp; Sign</Btn>
+              <Btn type="button" variant="outline" onClick={() => { setOpen(false); setDebug(""); }}>Cancel</Btn>
             </div>
           </form>
         </Modal>
