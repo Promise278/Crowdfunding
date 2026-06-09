@@ -1,15 +1,16 @@
 "use client";
-import { useWalletClient } from "wagmi";
-import { getWriteContractFromWallet } from "./contract";
+import { useAccount } from "wagmi";
+import { getWriteContract } from "./contract";
 
 /**
- * Returns a ready-to-use ethers Contract bound to the
- * wallet the user connected through RainbowKit.
- * Returns null when no wallet is connected.
+ * Returns a function that resolves to an ethers Contract
+ * signed by the account currently connected in RainbowKit/MetaMask.
  */
 export function useWriteContract() {
-  const { data: walletClient } = useWalletClient();
+  const { address, isConnected } = useAccount();
 
-  if (!walletClient) return null;
-  return getWriteContractFromWallet(walletClient);
+  if (!isConnected || !address) return null;
+
+  // Return an async getter so callers always get a fresh signer
+  return () => getWriteContract(address);
 }

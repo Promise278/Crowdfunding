@@ -16,26 +16,29 @@ interface Props {
 }
 
 export default function MilestonePanel({ id, campaign, milestones, myAddr, onRefresh }: Props) {
-  const { isConnected } = useAccount();
-  const contract        = useWriteContract();
-  const { show, Toast } = useToast();
-  const [busy, setBusy]     = useState<string | null>(null);
+  const { isConnected }   = useAccount();
+  const getContract       = useWriteContract();
+  const { show, Toast }   = useToast();
+  const [busy, setBusy]   = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm]     = useState({ title: "", amount: "" });
+  const [form, setForm]   = useState({ title: "", amount: "" });
 
   const isCreator = myAddr.toLowerCase() === campaign.creator.toLowerCase();
 
-  async function run(label: string, fn: () => Promise<{ wait: () => Promise<unknown> }>) {
-    if (!contract) return show("Connect your wallet first", "err");
+  async function run(label: string, fn: (cf: Awaited<ReturnType<NonNullable<typeof getContract>>>) => Promise<{ wait: () => Promise<unknown> }>) {
+    if (!getContract) return show("Connect your wallet first", "err");
     setBusy(label);
     try {
-      const tx = await fn();
+      const cf = await getContract();
+      const tx = await fn(cf);
       await tx.wait();
       show("Done ✓");
       onRefresh();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Transaction failed";
-      const reason = msg.match(/reason="([^"]+)"/)?.[1] ?? msg.slice(0, 100);
+      const msg    = err instanceof Error ? err.message : "Transaction failed";
+      const reason = msg.match(/reason="([^"]+)"/)?.[1]
+                  ?? msg.match(/revert\s+(.+)/i)?.[1]
+                  ?? msg.slice(0, 120);
       show(reason, "err");
     } finally { setBusy(null); }
   }
@@ -43,7 +46,7 @@ export default function MilestonePanel({ id, campaign, milestones, myAddr, onRef
   async function addMilestone(e: React.FormEvent) {
     e.preventDefault();
     if (!form.title || !form.amount) return;
-    await run("add", async () => contract!.addMilestone(id, form.title, ethers.parseEther(form.amount)));
+    await run("add", cf => cf.addMilestone(id, form.title, ethers.parseEther(form.amount)));
     setForm({ title: "", amount: "" });
     setAddOpen(false);
   }
@@ -88,7 +91,6 @@ export default function MilestonePanel({ id, campaign, milestones, myAddr, onRef
             campaign={campaign} isCreator={isCreator}
             busy={busy} isConnected={isConnected}
             onRun={run}
-            contract={contract}
           />
         ))
       )}
@@ -97,16 +99,16 @@ export default function MilestonePanel({ id, campaign, milestones, myAddr, onRef
 }
 
 // ── Single milestone row ──────────────────────────────────────────────────────
-type Contract = ReturnType<typeof useWriteContract>;
-type RunFn    = (label: string, fn: () => Promise<{ wait: () => Promise<unknown> }>) => Promise<void>;
+type CF  = Awaited<ReturnType<ReturnType<typeof useWriteContract> extends null ? never : NonNullable<ReturnType<typeof useWriteContract>>>>;
+type Run = (label: string, fn: (cf: CF) => Promise<{ wait: () => Promise<unknown> }>) => Promise<void>;
 
-function MilestoneRow({ idx, m, id, campaign, isCreator, busy, isConnected, onRun, contract }: {
+function MilestoneRow({ idx, m, id, campaign, isCreator, busy, isConnected, onRun }: {
   idx: number; m: Milestone; id: number; campaign: Campaign;
   isCreator: boolean; busy: string | null; isConnected: boolean;
-  onRun: RunFn; contract: Contract;
+  onRun: Run;
 }) {
-  const total   = Number(campaign.contributorCount);
-  const appPct  = total ? Math.round((Number(m.approvals) / total) * 100) : 0;
+  const total      = Number(campaign.contributorCount);
+  const appPct     = total ? Math.round((Number(m.approvals) / total) * 100) : 0;
   const votingEnded = m.votingOpen && Date.now() / 1000 > Number(m.votingDeadline);
 
   return (
@@ -129,7 +131,7 @@ function MilestoneRow({ idx, m, id, campaign, isCreator, busy, isConnected, onRu
         <div className="space-y-1 text-xs">
           <div className="flex justify-between text-gray-400">
             <span>✅ {m.approvals.toString()} approve ({appPct}%)</span>
-            <span>❌ {m.rejections.toString()} reject ({100 - appPct}%)</span>
+            <span>❌ {m.rejections.toString()} reject</span>
           </div>
           <div className="h-1.5 w-full rounded-full bg-gray-700 overflow-hidden">
             <div className="h-full bg-green-500 transition-all" style={{ width: `${appPct}%` }} />
@@ -143,32 +145,29 @@ function MilestoneRow({ idx, m, id, campaign, isCreator, busy, isConnected, onRu
       )}
 
       <div className="flex flex-wrap gap-2">
-        {/* Creator: open voting */}
         {isCreator && campaign.status === 1 && !m.votingOpen && !m.completed && (
           <Btn variant="outline" loading={busy === `req-${idx}`}
-            onClick={() => onRun(`req-${idx}`, () => contract!.requestMilestonePayout(id, idx))}>
+            onClick={() => onRun(`req-${idx}`, cf => cf.requestMilestonePayout(id, idx))}>
             Request Payout
           </Btn>
         )}
 
-        {/* Backers: vote */}
         {isConnected && !isCreator && m.votingOpen && !votingEnded && (
           <>
             <Btn loading={busy === `yes-${idx}`}
-              onClick={() => onRun(`yes-${idx}`, () => contract!.vote(id, idx, true))}>
+              onClick={() => onRun(`yes-${idx}`, cf => cf.vote(id, idx, true))}>
               👍 Approve
             </Btn>
             <Btn variant="danger" loading={busy === `no-${idx}`}
-              onClick={() => onRun(`no-${idx}`, () => contract!.vote(id, idx, false))}>
+              onClick={() => onRun(`no-${idx}`, cf => cf.vote(id, idx, false))}>
               👎 Reject
             </Btn>
           </>
         )}
 
-        {/* Anyone: finalise after voting ends */}
         {m.votingOpen && votingEnded && (
           <Btn variant="outline" loading={busy === `fin-${idx}`}
-            onClick={() => onRun(`fin-${idx}`, () => contract!.finaliseVoting(id, idx))}>
+            onClick={() => onRun(`fin-${idx}`, cf => cf.finaliseVoting(id, idx))}>
             Finalise Vote
           </Btn>
         )}

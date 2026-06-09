@@ -5,7 +5,7 @@ import { Btn, Input, Label, Modal, useToast } from "./ui";
 import { useWriteContract } from "@/lib/useContract";
 
 export default function FundModal({ id, onDone }: { id: number; onDone: () => void }) {
-  const contract        = useWriteContract();
+  const getContract     = useWriteContract();
   const [open, setOpen] = useState(false);
   const [eth, setEth]   = useState("");
   const [busy, setBusy] = useState(false);
@@ -13,20 +13,23 @@ export default function FundModal({ id, onDone }: { id: number; onDone: () => vo
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!contract) return show("Connect your wallet first", "err");
+    if (!getContract) return show("Connect your wallet first", "err");
     if (!eth || isNaN(parseFloat(eth))) return show("Enter a valid amount", "err");
 
     setBusy(true);
     try {
-      const tx = await contract.contribute(id, { value: ethers.parseEther(eth) });
+      const cf = await getContract();
+      const tx = await cf.contribute(id, { value: ethers.parseEther(eth) });
       await tx.wait();
       show("Contribution sent! 🎉");
       setOpen(false);
       setEth("");
       onDone();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Transaction failed";
-      const reason = msg.match(/reason="([^"]+)"/)?.[1] ?? msg.slice(0, 100);
+      const msg    = err instanceof Error ? err.message : "Transaction failed";
+      const reason = msg.match(/reason="([^"]+)"/)?.[1]
+                  ?? msg.match(/revert\s+(.+)/i)?.[1]
+                  ?? msg.slice(0, 120);
       show(reason, "err");
     } finally { setBusy(false); }
   }

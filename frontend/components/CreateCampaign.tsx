@@ -7,7 +7,7 @@ import { useWriteContract } from "@/lib/useContract";
 
 export default function CreateCampaign({ onCreated }: { onCreated: () => void }) {
   const { isConnected } = useAccount();
-  const contract        = useWriteContract();   // ← bound to RainbowKit wallet
+  const getContract     = useWriteContract();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { show, Toast } = useToast();
@@ -18,12 +18,13 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!contract)          return show("Connect your wallet first", "err");
+    if (!getContract)    return show("Connect your wallet first", "err");
     if (!form.title || !form.goal || !form.days) return show("Fill all fields", "err");
 
     setBusy(true);
     try {
-      const tx = await contract.createCampaign(
+      const cf = await getContract();
+      const tx = await cf.createCampaign(
         form.title,
         form.desc,
         ethers.parseEther(form.goal),
@@ -35,9 +36,10 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
       setForm({ title: "", desc: "", goal: "", days: "" });
       onCreated();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Transaction failed";
-      // Pull the revert reason out if present
-      const reason = msg.match(/reason="([^"]+)"/)?.[1] ?? msg.slice(0, 100);
+      const msg    = err instanceof Error ? err.message : "Transaction failed";
+      const reason = msg.match(/reason="([^"]+)"/)?.[1]
+                  ?? msg.match(/revert\s+(.+)/i)?.[1]
+                  ?? msg.slice(0, 120);
       show(reason, "err");
     } finally {
       setBusy(false);
@@ -47,7 +49,7 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
   return (
     <>
       {Toast}
-      <Btn onClick={() => setOpen(true)} disabled={!isConnected} title={!isConnected ? "Connect wallet first" : ""}>
+      <Btn onClick={() => setOpen(true)} disabled={!isConnected}>
         + New Campaign
       </Btn>
 
@@ -56,59 +58,26 @@ export default function CreateCampaign({ onCreated }: { onCreated: () => void })
           <form onSubmit={submit} className="space-y-4">
             <div>
               <Label>Title</Label>
-              <Input
-                placeholder="My awesome project"
-                value={form.title}
-                onChange={set("title")}
-                required
-              />
+              <Input placeholder="My awesome project" value={form.title} onChange={set("title")} required />
             </div>
             <div>
               <Label>Description</Label>
-              <Textarea
-                rows={3}
-                placeholder="What are you building?"
-                value={form.desc}
-                onChange={set("desc")}
-              />
+              <Textarea rows={3} placeholder="What are you building?" value={form.desc} onChange={set("desc")} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Goal (ETH)</Label>
-                <Input
-                  type="number" step="0.001" min="0.001"
-                  placeholder="1.0"
-                  value={form.goal}
-                  onChange={set("goal")}
-                  required
-                />
+                <Input type="number" step="0.001" min="0.001" placeholder="1.0" value={form.goal} onChange={set("goal")} required />
               </div>
               <div>
                 <Label>Duration (days)</Label>
-                <Input
-                  type="number" min="1" max="365"
-                  placeholder="30"
-                  value={form.days}
-                  onChange={set("days")}
-                  required
-                />
+                <Input type="number" min="1" max="365" placeholder="30" value={form.days} onChange={set("days")} required />
               </div>
             </div>
-
-            {/* show connected address for reassurance */}
-            {isConnected && (
-              <p className="text-xs text-gray-500">
-                Signing with your connected MetaMask wallet
-              </p>
-            )}
-
+            <p className="text-xs text-gray-500">MetaMask will ask you to sign this transaction.</p>
             <div className="flex gap-2 pt-1">
-              <Btn type="submit" loading={busy} className="flex-1">
-                Create &amp; Sign
-              </Btn>
-              <Btn type="button" variant="outline" onClick={() => setOpen(false)}>
-                Cancel
-              </Btn>
+              <Btn type="submit" loading={busy} className="flex-1">Create &amp; Sign</Btn>
+              <Btn type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Btn>
             </div>
           </form>
         </Modal>

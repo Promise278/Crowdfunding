@@ -2,9 +2,7 @@
 import { useEffect, useState, useCallback, use } from "react";
 import { useAccount } from "wagmi";
 import Link from "next/link";
-import {
-  Campaign, Milestone, STATUS_COLOR, STATUS_LABEL, getReadContract,
-} from "@/lib/contract";
+import { Campaign, Milestone, STATUS_COLOR, STATUS_LABEL, getReadContract } from "@/lib/contract";
 import { useWriteContract } from "@/lib/useContract";
 import { fmt, fmtDate, pct, shortAddr, timeLeft } from "@/lib/utils";
 import Navbar from "@/components/Navbar";
@@ -17,7 +15,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
   const id            = parseInt(idStr);
 
   const { address, isConnected } = useAccount();
-  const contract                 = useWriteContract();
+  const getContract              = useWriteContract();
   const { show, Toast }          = useToast();
 
   const [campaign,   setCampaign]   = useState<Campaign | null>(null);
@@ -47,17 +45,20 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
   useEffect(() => { load(); }, [load]);
 
-  async function runTx(fn: () => Promise<{ wait: () => Promise<unknown> }>) {
-    if (!contract) return show("Connect your wallet first", "err");
+  async function runTx(fn: (cf: Awaited<ReturnType<NonNullable<typeof getContract> extends () => Promise<infer R> ? () => Promise<R> : never>>) => Promise<{ wait: () => Promise<unknown> }>) {
+    if (!getContract) return show("Connect your wallet first", "err");
     setBusy(true);
     try {
-      const tx = await fn();
+      const cf = await getContract();
+      const tx = await fn(cf);
       await tx.wait();
       show("Done ✓");
       load();
     } catch (err: unknown) {
       const msg    = err instanceof Error ? err.message : "Transaction failed";
-      const reason = msg.match(/reason="([^"]+)"/)?.[1] ?? msg.slice(0, 100);
+      const reason = msg.match(/reason="([^"]+)"/)?.[1]
+                  ?? msg.match(/revert\s+(.+)/i)?.[1]
+                  ?? msg.slice(0, 120);
       show(reason, "err");
     } finally { setBusy(false); }
   }
@@ -78,13 +79,13 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     </>
   );
 
-  const progress      = pct(campaign.raised, campaign.goal);
-  const isCreator     = address?.toLowerCase() === campaign.creator.toLowerCase();
-  const isBacker      = myContrib > BigInt(0);
-  const canFund       = campaign.status === 0 && isConnected && !isCreator;
-  const canRefund     = campaign.status === 2 && isBacker && !refunded;
-  const deadlinePast  = Date.now() / 1000 >= Number(campaign.deadline);
-  const canFinalise   = campaign.status === 0 && deadlinePast;
+  const progress     = pct(campaign.raised, campaign.goal);
+  const isCreator    = address?.toLowerCase() === campaign.creator.toLowerCase();
+  const isBacker     = myContrib > BigInt(0);
+  const canFund      = campaign.status === 0 && isConnected && !isCreator;
+  const canRefund    = campaign.status === 2 && isBacker && !refunded;
+  const deadlinePast = Date.now() / 1000 >= Number(campaign.deadline);
+  const canFinalise  = campaign.status === 0 && deadlinePast;
 
   return (
     <>
@@ -92,11 +93,9 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
       {Toast}
       <main className="mx-auto max-w-5xl px-4 py-10 space-y-8">
 
-        <Link href="/" className="text-sm text-indigo-400 hover:text-indigo-300">
-          ← All Campaigns
-        </Link>
+        <Link href="/" className="text-sm text-indigo-400 hover:text-indigo-300">← All Campaigns</Link>
 
-        {/* ── Header card ─────────────────────────────────────────────────── */}
+        {/* Header */}
         <Card className="p-6 space-y-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="space-y-1">
@@ -104,9 +103,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
               <p className="text-sm text-gray-400">
                 by <span className="font-mono text-gray-300">{shortAddr(campaign.creator)}</span>
                 {isCreator && (
-                  <span className="ml-2 text-xs bg-indigo-900/50 text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-800">
-                    You
-                  </span>
+                  <span className="ml-2 text-xs bg-indigo-900/50 text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-800">You</span>
                 )}
               </p>
             </div>
@@ -127,8 +124,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                 <span className="text-gray-500 ml-1">raised of {fmt(campaign.goal)}</span>
               </div>
               <div className="text-right text-gray-400 text-xs space-y-0.5">
-                <p>{campaign.contributorCount.toString()} backers</p>
-                <p>{deadlinePast ? `Ended ${fmtDate(campaign.deadline)}` : timeLeft(campaign.deadline)}</p>
+                <p>👥 {campaign.contributorCount.toString()} backers</p>
+                <p>📅 {deadlinePast ? `Ended ${fmtDate(campaign.deadline)}` : timeLeft(campaign.deadline)}</p>
               </div>
             </div>
           </div>
@@ -139,18 +136,15 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
             </div>
           )}
 
-          {/* Action bar */}
           <div className="flex flex-wrap gap-3 pt-1">
             {canFund && <FundModal id={id} onDone={load} />}
             {canFinalise && (
-              <Btn variant="outline" loading={busy}
-                onClick={() => runTx(() => contract!.finaliseCampaign(id))}>
+              <Btn variant="outline" loading={busy} onClick={() => runTx(cf => cf.finaliseCampaign(id))}>
                 Finalise Campaign
               </Btn>
             )}
             {canRefund && (
-              <Btn variant="danger" loading={busy}
-                onClick={() => runTx(() => contract!.claimRefund(id))}>
+              <Btn variant="danger" loading={busy} onClick={() => runTx(cf => cf.claimRefund(id))}>
                 Claim Refund
               </Btn>
             )}
@@ -160,7 +154,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           </div>
         </Card>
 
-        {/* ── Stats row ───────────────────────────────────────────────────── */}
+        {/* Stats */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {[
             { label: "Goal",       value: fmt(campaign.goal) },
@@ -175,7 +169,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
           ))}
         </div>
 
-        {/* ── Milestones ──────────────────────────────────────────────────── */}
+        {/* Milestones */}
         <div>
           <h2 className="mb-4 text-lg font-semibold text-white">Milestones</h2>
           <MilestonePanel
