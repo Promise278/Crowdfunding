@@ -42,14 +42,7 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
 
     constructor() Ownable(msg.sender) {}
 
-    // ── Campaigns ─────────────────────────────────────────────────────────────
-
-    function createCampaign(
-        string calldata _title,
-        string calldata _desc,
-        uint256 _goal,
-        uint256 _days
-    ) external whenNotPaused {
+    function createCampaign( string calldata _title, string calldata _desc, uint256 _goal, uint256 _days) external whenNotPaused {
         require(bytes(_title).length > 0, "Title required");
         require(_goal > 0, "Goal must be > 0");
         require(_days > 0 && _days <= 365, "Duration: 1-365 days");
@@ -67,8 +60,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         c.status = c.raised >= c.goal ? Status.Successful : Status.Failed;
     }
 
-    // ── Funding ───────────────────────────────────────────────────────────────
-
     function contribute(uint256 id) external payable nonReentrant whenNotPaused {
         Campaign storage c = campaigns[id];
         require(c.status == Status.Active, "Not active");
@@ -83,8 +74,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         contributions[id][msg.sender] += msg.value;
         c.raised += msg.value;
     }
-
-    // ── Refund ────────────────────────────────────────────────────────────────
 
     function claimRefund(uint256 id) external nonReentrant {
         Campaign storage c = campaigns[id];
@@ -101,8 +90,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         (bool ok,) = payable(msg.sender).call{value: amt}("");
         require(ok, "Transfer failed");
     }
-
-    // ── Milestones ────────────────────────────────────────────────────────────
 
     function addMilestone(uint256 id, string calldata _title, uint256 _amount) external {
         Campaign storage c = campaigns[id];
@@ -123,8 +110,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         m.votingOpen = true;
         m.votingDeadline = block.timestamp + 3 days;
     }
-
-    // ── Voting ────────────────────────────────────────────────────────────────
 
     function vote(uint256 id, uint256 idx, bool approve) external {
         require(isContributor[id][msg.sender], "Not a contributor");
@@ -162,8 +147,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         }
     }
 
-    // ── Read ──────────────────────────────────────────────────────────────────
-
     function getCampaign(uint256 id)   external view returns (Campaign memory)  { return campaigns[id]; }
     function getMilestones(uint256 id) external view returns (Milestone[] memory) { return milestones[id]; }
     function getContributors(uint256 id) external view returns (address[] memory) { return contributors[id]; }
@@ -173,8 +156,6 @@ contract CrowdFund is ReentrancyGuard, Ownable, Pausable {
         all = new Campaign[](campaignCount);
         for (uint256 i = 0; i < campaignCount; i++) all[i] = campaigns[i];
     }
-
-    // ── Admin ─────────────────────────────────────────────────────────────────
 
     function pause()   external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
