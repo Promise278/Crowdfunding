@@ -311,19 +311,40 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
         {/* Milestones */}
         <div className="space-y-3">
-          <h2 className="font-semibold text-white">
-            Milestones{" "}
-            <span className="text-sm font-normal text-gray-500">({completedMs}/{milestones.length} completed)</span>
-          </h2>
-          <div className="rounded-xl bg-gray-900 border border-gray-800 overflow-hidden">
-            {milestones.length === 0 ? (
-              <p className="py-8 text-center text-sm text-gray-500">No milestones have been added yet.</p>
-            ) : (
-              <MilestonePanel
-                id={campaignId} campaign={campaign} milestones={milestones}
-                myAddr={address ?? ""} onRefresh={load}
-              />
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-white">
+              Milestones{" "}
+              <span className="text-sm font-normal text-gray-500">
+                ({completedMs}/{milestones.length} completed)
+              </span>
+            </h2>
+          </div>
+
+          {/* workflow guide strip */}
+          <div className="rounded-lg bg-gray-800/60 border border-gray-700 px-4 py-2.5 text-xs text-gray-400 space-y-0.5">
+            {isCreator && statusNum <= 1 && (
+              <p>🔧 <span className="text-white font-medium">Creator:</span> Add milestones below, then once the campaign is Successful use <span className="text-indigo-400">Request Payout Vote</span> on each milestone.</p>
             )}
+            {isCreator && statusNum === 1 && (
+              <p>📣 <span className="text-white font-medium">Next:</span> Click <span className="text-indigo-400">Request Payout Vote</span> on a pending milestone to open a 3-day voting window.</p>
+            )}
+            {isBacker && !isCreator && (
+              <p>🗳 <span className="text-white font-medium">Backer:</span> When voting is open on a milestone, cast your <span className="text-green-400">Approve</span> or <span className="text-red-400">Reject</span> vote.</p>
+            )}
+            {!isCreator && !isBacker && (
+              <p>💡 Fund this campaign to earn voting rights on milestone payouts.</p>
+            )}
+          </div>
+
+          <div className="rounded-xl bg-gray-900 border border-gray-800 overflow-hidden">
+            <MilestonePanel
+              id={campaignId}
+              campaign={campaign}
+              milestones={milestones}
+              myAddr={address ?? ""}
+              isBacker={isBacker}
+              onRefresh={load}
+            />
           </div>
         </div>
 
